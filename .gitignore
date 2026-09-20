@@ -1,0 +1,46 @@
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Python 编译产物 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- 测试与覆盖率 ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---------- 运行期产物 ----------
+logs/
+*.log
+app/static/mock/*.png
+
+# ---------- 大体积二进制资料 ----------
+# 课程/需求 PDF 等原始材料放在本地即可，不入库：
+# 二进制文件会永久占用仓库体积（即使日后删除，历史里依然存在）。
+*.pdf
