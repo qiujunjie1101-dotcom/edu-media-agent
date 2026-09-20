@@ -86,6 +86,32 @@ class Settings(BaseSettings):
         description="文章最多允许被人工驳回重写的次数；达到上限后只能人工通过",
     )
 
+    # ---------------- 跨源访问（S4 前端联调） ----------------
+    cors_allow_origins: str = Field(
+        default="http://localhost:5173",
+        description=(
+            "允许跨源调用本服务的前端来源，多个来源用英文逗号分隔。"
+            "默认只放行 Vite 开发服务器；留空字符串表示完全不启用 CORS。"
+            "不要填 *：本服务允许携带凭证，浏览器禁止二者同时使用。"
+        ),
+    )
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        """把逗号分隔的来源字符串解析成列表。
+
+        为什么用 str + 属性，而不是直接声明 ``list[str]``？
+            pydantic-settings 对 ``list[str]`` 字段会把环境变量当成 **JSON** 解析，
+            写成 ``A,B`` 会直接启动失败，对运维很不友好。
+            用字符串声明、再用本属性切分，既保留配置灵活性，
+            又给出「逗号分隔」这种最容易理解的书写方式。
+
+        返回:
+            list[str]: 去空白、去空项后的来源列表；配置为空时返回空列表
+                （main.py 据此**完全不注册** CORS 中间件）。
+        """
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

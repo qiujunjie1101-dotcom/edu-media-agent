@@ -41,6 +41,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -151,6 +152,39 @@ def _register_exception_handlers(application: FastAPI) -> None:
         )
 
 
+def _register_cors(application: FastAPI, settings: Settings) -> None:
+    """按配置注册跨源访问中间件（S4 前端联调）。
+
+    为什么需要它：
+        前端开发服务器（Vite，默认 http://localhost:5173）与后端（默认 8000 端口）
+        **不同源**，浏览器会拦截响应。必须由服务端显式放行来源。
+
+    为什么把范围收得这么窄：
+        1. 来源必须来自配置（``CORS_ALLOW_ORIGINS``），**绝不允许无条件 ``["*"]``**：
+           本服务允许携带凭证，而浏览器禁止 ``allow_origins=["*"]`` 与凭证同时使用；
+        2. 方法只放行本阶段真实用到的 GET / POST / OPTIONS，
+           不放行 PUT / DELETE / PATCH，避免「顺手把删除能力也暴露出去」；
+        3. 请求头只放行 ``Content-Type``——前端只发 JSON，不需要自定义头。
+        4. 配置为空字符串时**完全不注册中间件**，即默认关闭跨源，
+           需要跨源必须显式声明，符合「最小暴露面」原则。
+
+    参数:
+        application: FastAPI 应用实例
+        settings: 已解析的配置对象
+    """
+    allowed_origins = settings.cors_allow_origins_list
+    if not allowed_origins:
+        return
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """创建 FastAPI 应用实例。
 
@@ -214,6 +248,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     _register_exception_handlers(application)
+
+    # S4 前端联调所需的最小跨源配置：来源来自 Settings，默认只放行 Vite 开发服务器。
+    _register_cors(application, resolved_settings)
 
     # 挂载 v1 业务路由（/api/v1/workflows/*）。
     # 前缀与资源清单都在 app/api/v1/router.py 里集中声明。
