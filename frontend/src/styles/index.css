@@ -1,0 +1,238 @@
+/**
+ * Tailwind CSS 入口与设计系统定义。
+ *
+ * ============================================================================
+ * 为什么不用 `@import "tailwindcss"`？
+ * ============================================================================
+ * `@import "tailwindcss"` 会一并注入 preflight（全局重置）。本项目里
+ * app.css 已经有一套自己的重置与骨架样式，仍在为「内容方向 / 选择题目 /
+ * 审核文章」三屏服务。两套重置叠加会互相覆盖，产生难以定位的样式漂移。
+ * 因此这里只取 theme 与 utilities 两层，preflight 不加载——
+ * 新旧样式互不干扰，可以分屏逐步迁移。
+ *
+ * ============================================================================
+ * 设计取向：黑白极简 + 低饱和灰蓝
+ * ============================================================================
+ *   - 层次由「灰阶深浅 + 大留白 + 柔和阴影」建立，不靠彩色；
+ *   - 全站唯一的有彩色是 steel（低饱和灰蓝），只用于强调，不做装饰；
+ *   - 页面底色是极浅灰而非纯白，卡片纯白，靠明度差把卡片「托」起来；
+ *   - 圆角偏大、阴影柔和，避免老式后台的硬边框观感。
+ *
+ * 沿用的两条硬约束：不使用负 letter-spacing，不使用基于视口的字号（vw / clamp）。
+ */
+
+@layer theme, base, components, utilities;
+
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+@theme {
+  /* ==========================================================================
+     灰阶 —— 整个界面的骨架
+     ========================================================================== */
+
+  /** 页面底色：极浅灰，让纯白卡片能浮起来 */
+  --color-canvas: #f6f6f7;
+  /** 卡片 / 面板表面 */
+  --color-surface: #ffffff;
+  /** 略微下沉的面：代码块、骨架屏底、只读区域 */
+  --color-sunken: #fafafa;
+  /** 主文字：近黑，但不用纯黑，避免在浅灰底上过于刺眼 */
+  --color-ink: #0b0b0d;
+  /** 次级文字：正文说明 */
+  --color-ink-soft: #4b4b52;
+  /** 弱化文字：辅助说明、计数 */
+  --color-ink-mute: #8b8b93;
+  /** 极弱文字：要点 ID、单位后缀 */
+  --color-ink-faint: #b4b4ba;
+  /** 常规描边 */
+  --color-line: #e8e8ea;
+  /** 强调描边：分隔线、焦点 */
+  --color-line-strong: #d6d6da;
+
+  /* ==========================================================================
+     强调色 —— 全站唯一的有彩色，低饱和灰蓝
+     ========================================================================== */
+
+  --color-steel: #5b7186;
+  --color-steel-strong: #46596b;
+  --color-steel-soft: #eef1f4;
+  --color-steel-line: #d3dce4;
+
+  /* ==========================================================================
+     圆角 —— 卡片用大圆角，控件用中小圆角
+     ========================================================================== */
+
+  --radius-card: 16px;
+  --radius-panel: 12px;
+  --radius-control: 8px;
+
+  /* ==========================================================================
+     动效
+     ==========================================================================
+     全部走 cubic-bezier(.16,1,.3,1)（ease-out-expo 近似）：起步快、收尾慢，
+     视觉上「稳」。弹跳类动效只在勾选标记这类小元素上用，避免整体显得轻浮。
+     */
+
+  /** 入场：淡入 + 上浮（卡片、面板） */
+  --animate-rise: rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+  /** 切换：纯淡入（tab 面板内容） */
+  --animate-fade: fade 0.32s ease both;
+  /** 勾选标记：带回弹的缩放 */
+  --animate-pop: pop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  /** 骨架屏流光 */
+  --animate-shimmer: shimmer 1.8s linear infinite;
+  /** 当前步骤的微弱脉冲光晕 */
+  --animate-halo: halo 2.6s ease-in-out infinite;
+  /** 加载指示器 */
+  --animate-spin-slow: spin 0.8s linear infinite;
+}
+
+/* ==========================================================================
+   关键帧
+   ========================================================================== */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -160% 0;
+  }
+  to {
+    background-position: 260% 0;
+  }
+}
+
+/**
+ * 占位底的缓慢漂移。
+ * 与 shimmer 的区别在「慢」和「低对比」：shimmer 用于真实的加载中，
+ * 这个是常驻的预览位，转速太快会让人误以为一直在加载。
+ */
+@keyframes placeholder-drift {
+  0% {
+    background-position: 0 0, 160% 0;
+  }
+  50% {
+    background-position: 0 0, -60% 0;
+  }
+  100% {
+    background-position: 0 0, -120% 0;
+  }
+}
+
+/** 光晕：从一圈可见的环扩散到消失，循环往复。幅度刻意压小，只做「呼吸感」。 */
+@keyframes halo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-steel) 34%, transparent);
+  }
+  55% {
+    box-shadow: 0 0 0 7px color-mix(in oklab, var(--color-steel) 0%, transparent);
+  }
+}
+
+/* ==========================================================================
+   工具类
+   ========================================================================== */
+
+@layer utilities {
+  /** 骨架屏的流光底：浅灰底 + 一道更亮的斜向高光扫过 */
+  .skeleton-shimmer {
+    background-color: var(--color-sunken);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.9) 45%,
+      rgba(255, 255, 255, 0.9) 55%,
+      transparent 100%
+    );
+    background-size: 180% 100%;
+    background-repeat: no-repeat;
+  }
+
+  /**
+   * 卡片悬浮：上浮 + 阴影扩散。
+   * 阴影用两层叠加（近距离紧实 + 远距离扩散），比单层大模糊更像真实光照。
+   */
+  .card-hover {
+    transition:
+      transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 0.22s ease;
+  }
+  .card-hover:hover {
+    transform: translate3d(0, -3px, 0);
+    box-shadow:
+      0 1px 2px -1px rgba(11, 11, 13, 0.05),
+      0 14px 30px -16px rgba(11, 11, 13, 0.18);
+    border-color: var(--color-line-strong);
+  }
+
+  /**
+   * 灰阶占位底：图片「还没有 / 拿不到」时统一落到这一层。
+   * 用极浅的双向渐变而不是纯色，避免大片死板的灰；
+   * 叠加一道很慢、很低对比的流光，读起来是「预览位」而不是「加载中」。
+   */
+  .media-placeholder {
+    background-color: #f2f2f3;
+    background-image:
+      linear-gradient(160deg, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0) 62%),
+      linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.55) 50%, transparent 100%);
+    background-size: 100% 100%, 220% 100%;
+    background-repeat: no-repeat;
+    background-position: 0 0, -120% 0;
+    animation: placeholder-drift 4.5s ease-in-out infinite;
+  }
+
+  /** 尊重系统的「减少动态效果」偏好：关掉所有装饰性动画 */
+  @media (prefers-reduced-motion: reduce) {
+    .card-hover,
+    .card-hover:hover {
+      transform: none;
+      transition: none;
+    }
+
+    /*
+     * 全局兜底：把所有动画/过渡压到接近 0。
+     * 用 !important 是刻意的——Tailwind 的 animate-* 工具类优先级与这里相同，
+     * 不强制覆盖的话，声明顺序一变就会失效。
+     */
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

@@ -15,7 +15,8 @@
 | **S1** | 项目骨架、配置、领域模型、State、Mock 服务、`/health` | ✅ 已完成 |
 | **S2** | 完整 LangGraph 工作流、两个人工中断、驳回循环、内存 Checkpointer | ✅ 已完成 |
 | **S3** | `start` / `get` / `resume` 三个 HTTP 接口、WorkflowService、统一错误码 | ✅ 已完成 |
-| S4–S10 | 前端、PostgreSQL Checkpointer、业务历史、真实模型、SSE、可观测性 | 未开始 |
+| **S4** | 前端工作台（React + Vite）：四个界面、状态恢复、最小 CORS | ✅ 已完成 |
+| S5–S10 | PostgreSQL Checkpointer、业务历史、真实模型、SSE、可观测性 | 未开始 |
 
 > S1 交付「可导入、可启动、可测试」的地基；S2 交付「可暂停、可恢复、可驳回重写」的
 > 工作流内核；S3 交付「能被前端调用」的 HTTP 契约。三者都**不含**数据库、真实模型与鉴权。
@@ -76,6 +77,32 @@ python -m uvicorn app.main:app --reload
 ```bash
 python -m pytest -v
 ```
+
+## 前端工作台（S4）
+
+前端位于 `frontend/`（不放进 Python 的 `app/`），只调用上面那三个已有接口，
+**不修改任何 LangGraph 语义**。技术栈：React + TypeScript + Vite + Vitest +
+React Testing Library + lucide-react + Tailwind CSS v4 + shadcn/ui（Radix）。
+
+> **样式迁移进行中**：工作台外壳（顶栏 / 步骤栏 / 标题区）与「生成结果」一屏
+> 已迁到 Tailwind + shadcn；「内容方向 / 选择题目 / 审核文章」三屏仍走
+> `styles/app.css` 的旧样式体系。两套并存是刻意的——Tailwind 入口
+> （`styles/index.css`）**不加载 preflight**，避免它的全局重置冲掉旧样式。
+> 剩余三屏迁完后，`app.css` 与 `tokens.css` 即可整体删除。
+
+```bash
+cd frontend
+npm install
+cp .env.example .env      # 配置 VITE_API_BASE_URL，默认指向本机 8000 端口
+npm run dev               # 开发服务器：http://localhost:5173
+npm test                  # 组件与流程测试（Vitest）
+npm run typecheck         # TypeScript 类型检查
+npm run build             # 生产构建
+```
+
+联调要求两个服务同时运行：后端默认 8000 端口，前端默认 5173 端口。
+后端通过 `CORS_ALLOW_ORIGINS` 放行前端来源（默认 `http://localhost:5173`），
+因此**不要把前端端口改成别的值**，否则会被浏览器拦截。
 
 ## 演示：直接驱动工作流（S2）
 
