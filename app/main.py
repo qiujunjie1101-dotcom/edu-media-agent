@@ -53,6 +53,7 @@ from app.core.exceptions import (
     WorkflowError,
 )
 from app.graph.builder import build_workflow
+from app.graph.checkpointer import create_checkpointer
 from app.services.container import ServiceContainer
 from app.services.workflow_service import WorkflowService
 
@@ -69,6 +70,11 @@ class HealthResponse(BaseModel):
     status: str
     app: str
     environment: str
+    # 当前生效的检查点后端（memory / postgres）。
+    # 只暴露后端**名称**，不含连接串、主机、口令等任何连接信息。
+    # 加这个字段是为了让「重启后会话还在吗」这类问题一眼可查：
+    # 看到 memory 就知道重启必丢，不该去翻代码。
+    checkpointer: str
 
 
 # ---------------------------------------------------------------------------
@@ -212,29 +218,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         装配顺序（每一步都只做一次）:
 
             1. ServiceContainer  ：按配置选好 LLM / 图片服务实现；
-            2. CompiledWorkflow  ：把服务闭包注入节点，编译出图 + Checkpointer；
-            3. WorkflowService   ：持有上一步的图，成为唯一的业务入口。
+            2. CheckpointerResource：按 CHECKPOINTER_BACKEND 建检查点存储，
+               postgres 模式下在这里打开连接池并跑完表结构迁移；
+            3. CompiledWorkflow  ：把服务闭包注入节点，用上一步的存储编译出图；
+            4. WorkflowService   ：持有上一步的图，成为唯一的业务入口。
 
         为什么在启动时装配？
             服务实例应该「创建一次、全程复用」，而不是每次请求都新建；
-            同时这样能在启动阶段就发现配置错误（比如 provider 写错），快速失败。
+            同时这样能在启动阶段就发现配置错误（比如 provider 写错、库连不上），
+            快速失败。
+
+        异常策略：
+            任何一步失败都让应用启动失败，**不做静默降级**。
+            尤其是「说好要用 postgres 却连不上」这种情况——悄悄退回 memory
+            会让「重启后会话还在」这个承诺静默失效，等线上重启才发现就太晚了。
         """
         container = ServiceContainer.build(resolved_settings)
-        workflow = build_workflow(
-            llm_service=container.llm_service,
-            image_service=container.image_service,
-            max_revisions=resolved_settings.max_revisions,
-        )
+
+        # 检查点存储。postgres 模式下这一步会真正连库并执行迁移，
+        # 因此「库连不上」在这里就会暴露，而不是等第一个请求进来。
+        checkpointer = await create_checkpointer(resolved_settings)
+
+        try:
+            workflow = build_workflow(
+                llm_service=container.llm_service,
+                image_service=container.image_service,
+                max_revisions=resolved_settings.max_revisions,
+                checkpointer=checkpointer.saver,
+            )
+        except Exception:
+            # 构图失败时连接池已经开着了，必须释放，
+            # 否则进程里会残留后台连接与工作线程。
+            await checkpointer.aclose()
+            raise
 
         _app.state.settings = resolved_settings
         _app.state.container = container
+        _app.state.checkpointer = checkpointer
         _app.state.workflow = workflow
         _app.state.workflow_service = WorkflowService(workflow)
 
         # yield 代表「应用正在运行」这一段。
-        # InMemorySaver 没有需要显式关闭的资源；将来接入数据库连接池时，
-        # 清理逻辑写在这里（S5）。
-        yield
+        try:
+            yield
+        finally:
+            # 无论正常关闭还是启动中途抛异常，都释放连接池。
+            # aclose() 可重复调用，memory 模式下是空操作。
+            await checkpointer.aclose()
 
     application = FastAPI(
         title=resolved_settings.app_name,
@@ -274,6 +304,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status="healthy",
             app=resolved_settings.app_name,
             environment=resolved_settings.app_env,
+            # 取自配置而非 app.state：本接口不依赖 lifespan 是否已执行，
+            # 这样测试里直接调用 ASGI 应用（不触发启动钩子）也能正常响应。
+            # 应用能对外提供服务，就说明启动时的检查点初始化已经成功了。
+            checkpointer=resolved_settings.resolved_checkpointer_backend,
         )
 
     return application

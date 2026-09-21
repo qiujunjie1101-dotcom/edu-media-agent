@@ -16,10 +16,12 @@
 | **S2** | 完整 LangGraph 工作流、两个人工中断、驳回循环、内存 Checkpointer | ✅ 已完成 |
 | **S3** | `start` / `get` / `resume` 三个 HTTP 接口、WorkflowService、统一错误码 | ✅ 已完成 |
 | **S4** | 前端工作台（React + Vite）：四个界面、状态恢复、最小 CORS | ✅ 已完成 |
-| S5–S10 | PostgreSQL Checkpointer、业务历史、真实模型、SSE、可观测性 | 未开始 |
+| **S5** | PostgreSQL Checkpointer：会话跨重启持久化、`CHECKPOINTER_BACKEND` 开关 | ✅ 已完成 |
+| S6–S10 | 业务历史、真实模型、SSE、可观测性 | 未开始 |
 
 > S1 交付「可导入、可启动、可测试」的地基；S2 交付「可暂停、可恢复、可驳回重写」的
-> 工作流内核；S3 交付「能被前端调用」的 HTTP 契约。三者都**不含**数据库、真实模型与鉴权。
+> 工作流内核；S3 交付「能被前端调用」的 HTTP 契约；S5 交付「重启不丢会话」的持久化。
+> **S5 只持久化 LangGraph 的运行时状态，不建任何业务表**——业务历史属于 S6。
 
 ---
 
@@ -50,7 +52,8 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-S1 阶段全部使用 Mock 服务，`.env` 保持默认值即可，**不需要任何 API Key，也不需要数据库**。
+当前全部使用 Mock 服务，`.env` 保持默认值即可，**不需要任何 API Key，也不需要数据库**
+（检查点默认存在进程内存里，重启即丢；要跨重启持久化见下文「检查点持久化（S5）」）。
 
 ## 启动服务
 
@@ -66,8 +69,16 @@ python -m uvicorn app.main:app --reload
 健康检查返回示例：
 
 ```json
-{"status": "healthy", "app": "自媒体内容运营 AI 智能体", "environment": "local"}
+{
+  "status": "healthy",
+  "app": "自媒体内容运营 AI 智能体",
+  "environment": "local",
+  "checkpointer": "memory"
+}
 ```
+
+`checkpointer` 是 S5 新增的字段，只暴露后端**名称**（`memory` / `postgres`），
+不含任何连接信息。想换成重启不丢会话的模式，见下文「检查点持久化（S5）」。
 
 ## 运行测试
 
@@ -77,6 +88,151 @@ python -m uvicorn app.main:app --reload
 ```bash
 python -m pytest -v
 ```
+
+默认**不需要任何数据库**：检查点存在进程内存里，所有测试开箱即绿。
+需要真实 PostgreSQL 的用例单独打了标记，没配测试库时会自动跳过（见下文）。
+
+## 检查点持久化（S5）
+
+### 它解决什么问题
+
+默认的 `InMemorySaver` 把会话状态存在**进程内存**里，后端一重启就全没了 ——
+你正看着「审核文章」页面，服务重启一下，刷新就是 `THREAD_NOT_FOUND`。
+开发时 `uvicorn --reload` 每改一次代码就丢一次会话。
+
+换成 PostgreSQL Checkpointer 之后，会话状态的寿命从「一次进程」延长到「永久」：
+关掉服务、重启机器，只要 `thread_id` 还在，就能凭它恢复现场。
+
+### 先用哪种？
+
+| 后端 | 适用场景 |
+|---|---|
+| `memory`（**默认**） | 本地开发、跑测试。零依赖，重启即丢 |
+| `postgres` | 想验证「重启后会话还在」、或准备长期保留会话时 |
+
+### 1. 创建本地数据库
+
+```bash
+# macOS（Homebrew 装的 PostgreSQL）
+brew install postgresql@17
+brew services start postgresql@17
+createdb langgraph_db
+```
+
+不需要手动建表 —— 应用启动时会自动执行 LangGraph 自带的表结构迁移。
+
+### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+`memory` 模式保持默认即可。要用 `postgres` 模式，改 `.env`：
+
+```bash
+CHECKPOINTER_BACKEND=postgres
+POSTGRES_URI=postgresql://你的用户:你的口令@localhost:5432/langgraph_db
+```
+
+> ⚠️ `.env` 已被 `.gitignore` 忽略，**真实口令只填在这里**，不要写进 `.env.example`
+> 或任何会被提交的文件。服务日志与错误信息里，连接串的口令一律显示为 `***`。
+
+### 3. 启动
+
+```bash
+# memory 模式（默认，不需要数据库）
+python -m uvicorn app.main:app --reload
+
+# postgres 模式
+CHECKPOINTER_BACKEND=postgres \
+POSTGRES_URI='postgresql://用户:口令@localhost:5432/langgraph_db' \
+python -m uvicorn app.main:app --reload
+```
+
+启动后看一眼 `http://127.0.0.1:8000/health`，`checkpointer` 字段会告诉你当前用的是哪个后端：
+
+```json
+{"status":"healthy","app":"...","environment":"local","checkpointer":"postgres"}
+```
+
+看到 `memory` 就说明重启必丢，不该去翻代码找原因。
+
+**配置写错会直接启动失败**，不会静默退回 memory：
+
+- 选了 `postgres` 却没给 `POSTGRES_URI` → 拒绝启动
+- `POSTGRES_URI` 连不上、库不存在 → 拒绝启动，并给出脱敏后的错误
+- `CHECKPOINTER_BACKEND` 写了 `sqlite` 之类的值 → 拒绝启动，并列出可选值
+
+这是刻意的。静默降级会让「重启后会话还在」这个承诺悄悄失效，
+等到线上重启才发现就太晚了。
+
+### 4. 怎么验证重启恢复
+
+```bash
+# ① 启动（postgres 模式），创建一个会话并推进到审核中断
+curl -X POST http://127.0.0.1:8000/api/v1/workflows/start \
+  -H 'Content-Type: application/json' -d '{"topic_direction":"测试重启恢复"}'
+# 记下返回的 thread_id，然后选题
+curl -X POST http://127.0.0.1:8000/api/v1/workflows/<thread_id>/resume \
+  -H 'Content-Type: application/json' -d '{"action":"select_topic","topic_id":"t1"}'
+
+# ② 完全停掉后端进程（Ctrl-C，或者 kill -9），再重新启动
+
+# ③ 凭 thread_id 查询 —— 文章与待办动作都还在
+curl http://127.0.0.1:8000/api/v1/workflows/<thread_id>
+# → status=awaiting_review，article_content 非空，pending_action.type=article_review
+```
+
+换成 `memory` 模式重做一遍，第 ③ 步会返回 `THREAD_NOT_FOUND` —— 这就是两者的区别。
+
+### 5. 跑 PostgreSQL 集成测试
+
+```bash
+createdb langgraph_test
+export TEST_POSTGRES_URI='postgresql://用户:口令@localhost:5432/langgraph_test'
+python -m pytest tests/integration/test_postgres_checkpointer.py -v
+
+# 或者只跑全部测试里的 postgres 那一组
+python -m pytest -m postgres -v
+```
+
+不设 `TEST_POSTGRES_URI` 时这组用例会**明确 skip**（报告里显示 SKIPPED），
+不会伪装成通过。
+
+### 6. ⚠️ Checkpointer 不是业务数据库
+
+这是最容易误解的一点。检查点表（`checkpoints` / `checkpoint_blobs` /
+`checkpoint_writes` / `checkpoint_migrations`）里存的是：
+
+- LangGraph 的**框架内部状态**：每个超级步的快照、待执行任务、中断信息、通道版本号
+- 格式是**框架私有的序列化编码**，版本升级可能变化，**不能当作对外契约**
+- 没有外键、唯一键、字段级校验，也没有任何按业务维度的索引
+
+所以它**不能**用来做这些事：按状态/时间检索会话列表、统计、审计、对外提供数据。
+
+那些属于**业务数据**，会由 S6 用独立的表（`workflow_session` /
+`content_artifact` / `review_log`）承载，与检查点表通过 `thread_id` 关联。
+两者的生命周期也不同：检查点会因为回溯、重试而频繁增长，可以按策略清理；
+业务数据需要长期留存。
+
+一句话：**检查点负责「流程能不能接着跑」，业务表负责「发生了什么」。**
+
+### 7. 给检查点表加中文注释（可选，但强烈建议）
+
+这四张表由 LangGraph 创建，默认没有任何注释，在 Navicat / psql 里看是一头雾水。
+仓库里带了一个只加注释、不动结构的脚本：
+
+```bash
+psql -d agent_dev -f scripts/annotate_checkpoint_tables.sql
+```
+
+跑完再 `\d+ checkpoints`（或 Navicat 里点开表设计），每张表每个字段都能看到中文说明，
+比如 `checkpoint_blobs.channel` 会告诉你「这里存的是 generated_topics / article_content 这些通道名」。
+
+两点说明：
+
+- 脚本只执行 `COMMENT ON`，**不改变字段、类型、索引和数据**，对 LangGraph 的运行没有影响；
+- 如果将来 LangGraph 升级时用「重建表」的方式改结构，注释可能丢失，重跑一次即可恢复。
 
 ## 前端工作台（S4）
 
@@ -211,18 +367,20 @@ Graph 之前会依次校验：
 
 ---
 
-## 目录结构（S1–S3 范围）
+## 目录结构（S1–S5 范围）
 
 ```text
 yy_agent/
 ├── requirements.txt          # 依赖清单（langgraph 已锁定 1.2.11）
+├── pytest.ini                # pytest 配置：注册 postgres 标记（S5）
 ├── .env.example              # 环境变量模板（复制为 .env 使用）
 ├── .gitignore                # 忽略 .env、缓存、虚拟环境等
 ├── README.md                 # 本文件
 ├── docs/
 │   └── 技术方案设计.md       # 完整技术方案 v2
 ├── scripts/
-│   └── demo_workflow.py      # 演示脚本：直接驱动 Graph 走完整流程（S2）
+│   ├── demo_workflow.py      # 演示脚本：直接驱动 Graph 走完整流程（S2）
+│   └── annotate_checkpoint_tables.sql  # 给 LangGraph 检查点表加中文注释（S5，可选）
 ├── app/
 │   ├── main.py               # FastAPI 应用工厂 + lifespan 单例装配 + 全局异常处理器
 │   ├── api/                  # HTTP 边界层（S3）：只做校验/转发/响应，不碰 Graph
@@ -241,7 +399,7 @@ yy_agent/
 │   │   ├── state.py          # MediaWorkflowState（TypedDict，JSON 可序列化）
 │   │   ├── builder.py        # 构图 + 编译；CompiledWorkflow 持有 checkpointer（S2）
 │   │   ├── routing.py        # 节点名常量 + route_after_review 纯函数（S2）
-│   │   ├── checkpointer.py   # 创建 InMemorySaver（S2；S5 换成 PostgreSQL）
+│   │   ├── checkpointer.py   # 检查点工厂：memory / postgres 两种后端 + 连接池生命周期（S5）
 │   │   └── nodes/            # 6 个节点，一一对应（S2）
 │   │       ├── plan_topics.py          # 生成候选选题
 │   │       ├── human_select_topic.py   # 人工中断点 #1

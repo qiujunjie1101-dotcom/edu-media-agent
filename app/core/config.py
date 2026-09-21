@@ -23,14 +23,21 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
+from typing import Final
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 # BaseSettings 是 pydantic-settings 提供的基础类：在普通 BaseModel 之上
 # 增加了「从环境变量 / .env 文件读取值」的能力。
 # SettingsConfigDict 用来声明配置行为（读哪个文件、编码、未知字段怎么办等）。
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 当前支持的检查点后端。定义在这里而不是 checkpointer.py，
+# 是为了让「配置合法性校验」与「后端实现」互不依赖（后者会 import Settings，
+# 反向 import 会形成环）。
+SUPPORTED_CHECKPOINTER_BACKENDS: Final[tuple[str, ...]] = ("memory", "postgres")
 
 
 class Settings(BaseSettings):
@@ -111,6 +118,108 @@ class Settings(BaseSettings):
                 （main.py 据此**完全不注册** CORS 中间件）。
         """
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
+    # ---------------- 检查点存储（S5） ----------------
+    # 同样声明为 str 而非 Literal，理由见上方 llm_provider 的注释：
+    # 非法取值要在校验器里给出中文的清晰错误，而不是英文的类型错误。
+    checkpointer_backend: str = Field(
+        default="memory",
+        description=(
+            "检查点存储后端：memory（进程内，重启即丢）或 postgres（持久化）。"
+            "默认 memory，因此本地开发与跑测试都不需要数据库。"
+        ),
+    )
+    postgres_uri: str = Field(
+        default="",
+        description=(
+            "PostgreSQL 连接串，仅 checkpointer_backend=postgres 时必填。"
+            "格式：postgresql://用户:口令@主机:端口/库名。"
+            "**不要把真实口令写进代码或提交到仓库**，本地填入 .env 即可（.env 已被忽略）。"
+        ),
+    )
+    postgres_pool_min_size: int = Field(
+        default=1,
+        ge=1,
+        le=50,
+        description="连接池最小连接数；启动时会立即建立这么多连接，因此配大了会拖慢启动",
+    )
+    postgres_pool_max_size: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="连接池最大连接数；并发会话数超过它时，后来的请求会在池上排队等待",
+    )
+
+    @property
+    def resolved_checkpointer_backend(self) -> str:
+        """归一化后的后端名（去空白、转小写）。
+
+        容忍 ``"Postgres"`` / ``" memory "`` 这类写法，
+        避免因为大小写或空格导致启动失败。
+        """
+        return self.checkpointer_backend.strip().lower()
+
+    @property
+    def redacted_postgres_uri(self) -> str:
+        """用于**日志输出**的连接串，口令已替换为 ``***``。
+
+        连接串里通常含有数据库口令。启动日志、错误信息一旦原样打印它，
+        口令就会进日志文件、进 CI 输出、进截图。因此对外只暴露本属性，
+        不直接使用 ``postgres_uri``。
+
+        返回:
+            str: 形如 ``postgresql://user:***@host:5432/db``；
+                未配置时返回空字符串。
+        """
+        if not self.postgres_uri:
+            return ""
+        # 匹配 URI 里 "口令@" 之前的部分：scheme://user:password@
+        # 只替换口令段，保留用户名/主机/库名，方便排查「连错库」这类问题。
+        # 用户名用 * 而非 +：postgresql://:口令@主机 这种「只有口令没有用户名」
+        # 的写法也要能脱敏（libpq 允许省略用户名）。
+        return re.sub(r"(://[^:/@]*:)[^@]*(@)", r"\1***\2", self.postgres_uri)
+
+    @model_validator(mode="after")
+    def _validate_checkpointer(self) -> Settings:
+        """校验检查点相关配置的组合合法性。
+
+        为什么放在校验器里而不是等到创建 Checkpointer 时再判断？
+            这是**配置本身的矛盾**（说要用 postgres 却没给连接串），
+            属于「启动即失败」的范畴。放在这里，进程在读完配置的那一刻就报错，
+            不会出现「服务已经起来了，第一个请求进来才发现连不上库」。
+
+        为什么要求 model_validator(mode="after")？
+            要同时看多个字段（backend + uri + 池大小），
+            只有 after 模式才能拿到已经填好默认值的完整对象。
+
+        异常:
+            ValueError: 后端取值不支持、postgres 模式缺 URI、或池大小区间颠倒
+        """
+        backend = self.resolved_checkpointer_backend
+
+        if backend not in SUPPORTED_CHECKPOINTER_BACKENDS:
+            raise ValueError(
+                f"不支持的 checkpointer_backend：{self.checkpointer_backend!r}。"
+                f"可选值：{', '.join(SUPPORTED_CHECKPOINTER_BACKENDS)}。"
+            )
+
+        if backend == "postgres" and not self.postgres_uri.strip():
+            # 刻意**不回退到 memory**：配置说要持久化却不给库，
+            # 静默降级会让「重启后会话还在」这个承诺悄悄失效，
+            # 等到线上重启才发现就太晚了。这里必须硬失败。
+            raise ValueError(
+                "checkpointer_backend=postgres 时必须提供 postgres_uri。"
+                "请在 .env 中设置 POSTGRES_URI=postgresql://用户:口令@主机:端口/库名"
+                "（注意不要把真实口令写进代码或提交到仓库）。"
+            )
+
+        if self.postgres_pool_min_size > self.postgres_pool_max_size:
+            raise ValueError(
+                f"postgres_pool_min_size（{self.postgres_pool_min_size}）"
+                f"不能大于 postgres_pool_max_size（{self.postgres_pool_max_size}）。"
+            )
+
+        return self
 
 
 @lru_cache(maxsize=1)

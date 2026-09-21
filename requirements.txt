@@ -9,8 +9,8 @@
 #      真正上线时建议再用 pip freeze 生成锁定文件。
 #   2. 带方括号的写法（如 uvicorn[standard]）表示安装该包的「附加依赖组合」，
 #      standard 会额外装上 uvloop（更快的异步事件循环）等可选组件。
-#   3. 本文件包含 S1–S2 阶段所需依赖。
-#      后续阶段会追加：sqlalchemy/asyncpg/psycopg（S5 持久化）。
+#   3. 本文件包含 S1–S5 阶段所需依赖。
+#      后续阶段会追加：sqlalchemy/alembic（S6 业务表与迁移）。
 # ============================================================================
 
 # ---------- 工作流编排 ----------
@@ -19,6 +19,18 @@
 # 这里锁定具体版本，因为 1.0 前后部分 API 的导入路径与语义有过调整，
 # 升级前请先跑通 tests/integration/test_workflow.py。
 langgraph==1.2.11
+
+# ---------- 检查点持久化（S5） ----------
+# LangGraph 的 PostgreSQL 检查点实现。**不是** langgraph 的默认依赖，
+# 必须单独安装；且它只在 CHECKPOINTER_BACKEND=postgres 时才会被导入，
+# 因此 memory 模式（本地开发 / 绝大多数测试）不会用到它。
+langgraph-checkpoint-postgres>=3.1.0
+
+# PostgreSQL 驱动与连接池。AsyncPostgresSaver 通过它读写检查点：
+#   [binary] 装预编译的 C 扩展，省去本地编译（macOS/Linux 都有轮子）
+#   [pool]   带上 psycopg_pool，连接池在它里面
+# 没有它，postgres 模式会在创建 Checkpointer 时报 ImportError。
+psycopg[binary,pool]>=3.2.0
 
 # ---------- Web 框架与 ASGI 服务器 ----------
 fastapi>=0.115.0            # 提供 HTTP 路由、依赖注入、自动生成 OpenAPI 文档

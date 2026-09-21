@@ -34,6 +34,9 @@ async def test_health_endpoint_returns_200(client: Any, settings: Any) -> None:
     """GET /health 返回 200，且响应体字段与配置一致。
 
     验收标准 2：/health 返回 200 且内容符合约定。
+
+    S5 起增加了 ``checkpointer`` 字段：只暴露后端**名称**，
+    用于一眼判断「当前会话重启后会不会丢」。
     """
     response = await client.get("/health")
 
@@ -42,7 +45,38 @@ async def test_health_endpoint_returns_200(client: Any, settings: Any) -> None:
         "status": "healthy",
         "app": settings.app_name,
         "environment": settings.app_env,
+        "checkpointer": settings.resolved_checkpointer_backend,
     }
+
+
+@pytest.mark.asyncio
+async def test_health_checkpointer_field_does_not_leak_connection_info(
+    settings: Any,
+) -> None:
+    """``/health`` 只能暴露后端名，绝不能带出连接串的任何片段。
+
+    连接串里含口令，一旦进响应体，就会出现在浏览器、日志、监控采样里。
+    这里直接搜索响应原文，确保连主机名、库名、用户名都不出现。
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import create_app
+
+    secret_uri = "postgresql://leakuser:leakpass@leakhost:5432/leakdb"
+    configured = settings.model_copy(
+        update={"checkpointer_backend": "memory", "postgres_uri": secret_uri}
+    )
+
+    app = create_app(configured)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.get("/health")
+
+    # memory 模式下即便配了连接串，也不该出现在响应里
+    assert response.json()["checkpointer"] == "memory"
+    raw = response.text
+    for fragment in ("leakpass", "leakhost", "leakdb", "leakuser", secret_uri):
+        assert fragment not in raw, f"响应体泄露了连接信息：{fragment}"
 
 
 @pytest.mark.asyncio

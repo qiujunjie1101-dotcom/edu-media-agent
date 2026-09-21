@@ -35,11 +35,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.graph.checkpointer import create_in_memory_checkpointer
 from app.graph.nodes.extract_visuals import build_extract_visuals_node
 from app.graph.nodes.generate_images import build_generate_images_node
 from app.graph.nodes.human_review import build_human_review_node
@@ -100,7 +100,7 @@ def build_workflow(
     llm_service: LLMService,
     image_service: ImageService,
     max_revisions: int,
-    checkpointer: InMemorySaver | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledWorkflow:
     """组装并编译工作流。
 
@@ -115,8 +115,13 @@ def build_workflow(
         CompiledWorkflow: 编译后的图与检查点的组合体
 
     """
-    # 检查点只创建一次，并与返回的 CompiledWorkflow 绑定
-    saver = checkpointer if checkpointer is not None else create_in_memory_checkpointer()
+    # 检查点只创建一次，并与返回的 CompiledWorkflow 绑定。
+    #
+    # 不传 checkpointer 时退回内存实现，只是为了让单元测试能直接调本函数
+    # （它们不关心持久化）。**应用运行时一律由 lifespan 显式传入**——
+    # 那里会按 CHECKPOINTER_BACKEND 决定用内存还是 PostgreSQL，
+    # 本函数不读配置，以免同一条装配路径出现两个决策点。
+    saver: BaseCheckpointSaver = checkpointer if checkpointer is not None else InMemorySaver()
 
     builder: StateGraph = StateGraph(MediaWorkflowState)
 
